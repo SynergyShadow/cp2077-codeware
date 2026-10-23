@@ -1,4 +1,3 @@
-```yaml
 name: build-2.5
 
 on:
@@ -21,39 +20,28 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Configure RED4ext SDK submodule
+      - name: Configure RED4ext SDK
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
           git config -f .gitmodules submodule.vendor/RED4ext.SDK.url "https://github.com/KelpHect/RED4ext.SDK-psiberx.git"
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Failed to configure the RED4ext SDK submodule URL."
-          }
+          if ($LASTEXITCODE -ne 0) { throw "Failed to configure SDK URL." }
 
           git submodule sync -- vendor/RED4ext.SDK
-          if ($LASTEXITCODE -ne 0) {
-            throw "Failed to synchronize the RED4ext SDK submodule."
-          }
+          if ($LASTEXITCODE -ne 0) { throw "Failed to synchronize SDK submodule." }
 
           git submodule update --init --force vendor/RED4ext.SDK
-          if ($LASTEXITCODE -ne 0) {
-            throw "Failed to update the RED4ext SDK submodule."
-          }
+          if ($LASTEXITCODE -ne 0) { throw "Failed to update SDK submodule." }
 
           $sdk = (git -C vendor/RED4ext.SDK rev-parse HEAD).Trim()
-          if ($LASTEXITCODE -ne 0) {
-            throw "Could not determine the RED4ext SDK commit."
-          }
+          if ($LASTEXITCODE -ne 0) { throw "Failed to read SDK commit." }
 
-          Write-Host "Checked out RED4ext SDK commit: $sdk"
+          Write-Host "RED4ext SDK commit: $sdk"
 
           if ($sdk -ne "12e0c33337f8612850854fb9ed5ad9628796afca") {
             throw "Unexpected SDK commit: $sdk"
           }
-
-          Write-Host "RED4ext SDK commit verified."
 
       - name: Set up Xmake
         uses: xmake-io/github-action-setup-xmake@v1
@@ -72,44 +60,38 @@ jobs:
 
           $content = Get-Content $path -Raw
           $pin = 'add_requireconfs("tiltedcore.mimalloc", {version = "2.2.4", override = true})'
+          $pattern = 'add_requireconfs\s*\(\s*["'']tiltedcore\.mimalloc'
 
-          if ($content -match 'add_requireconfs\s*\(\s*["'']tiltedcore\.mimalloc') {
-            Write-Host "A mimalloc override already exists."
+          if ($content -match $pattern) {
+            Write-Host "Mimalloc override already exists."
           } else {
             $anchor = 'add_requires("hopscotch-map", "minhook", "spdlog", "tiltedcore")'
 
             if (-not $content.Contains($anchor)) {
-              throw "Could not find the root-level dependency declaration in xmake.lua."
+              throw "Expected add_requires declaration was not found."
             }
 
             $content = $content.Replace($anchor, "$pin`r`n$anchor")
             Set-Content -Path $path -Value $content -NoNewline
           }
 
-          Write-Host "Dependency configuration:"
-          Get-Content $path | Select-Object -First 60
-
-      - name: Configure Release build
+      - name: Configure Release
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
           xmake f -m release -y
-
           if ($LASTEXITCODE -ne 0) {
-            throw "Xmake configuration failed with exit code $LASTEXITCODE."
+            throw "Xmake configuration failed: exit code $LASTEXITCODE"
           }
 
       - name: Build Codeware
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
           xmake -y
-
           if ($LASTEXITCODE -ne 0) {
-            throw "Codeware compilation failed with exit code $LASTEXITCODE."
+            throw "Codeware build failed: exit code $LASTEXITCODE"
           }
 
-      - name: Locate compiled DLL
+      - name: Locate DLL
         id: locate
         shell: pwsh
         run: |
@@ -120,8 +102,6 @@ jobs:
             Select-Object -First 1
 
           if (-not $dll) {
-            Write-Host "No release DLL found under build. Searching repository..."
-
             $dll = Get-ChildItem -Path . -Recurse -File -Filter "Codeware.dll" |
               Where-Object { $_.FullName -notmatch '[\\/](vendor|\.git)[\\/]' } |
               Select-Object -First 1
@@ -131,49 +111,40 @@ jobs:
             throw "Codeware.dll was not produced."
           }
 
-          Write-Host "Found DLL: $($dll.FullName)"
+          Write-Host "DLL: $($dll.FullName)"
           "dll=$($dll.FullName)" >> $env:GITHUB_OUTPUT
 
       - name: Package release ZIP
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-
           $script = Join-Path $PWD "tools/dist/package-mod.ps1"
+          $dll = "${{ steps.locate.outputs.dll }}"
+
           if (-not (Test-Path $script)) {
             throw "Packaging script not found: $script"
           }
 
-          $dll = "${{ steps.locate.outputs.dll }}"
           if (-not (Test-Path $dll)) {
-            throw "Compiled DLL does not exist: $dll"
+            throw "Compiled DLL not found: $dll"
           }
 
           New-Item -ItemType Directory -Path "build/dist" -Force | Out-Null
 
-          Write-Host "Packaging: $dll"
           & $script -ReleaseBin $dll -ProjectName $env:PROJECT
 
           if (-not $?) {
-            throw "The packaging script reported a failure."
+            throw "Packaging script failed."
           }
 
           $zip = Get-ChildItem -Path "build/dist" -File -Filter "*.zip" -ErrorAction SilentlyContinue |
             Select-Object -First 1
 
           if (-not $zip) {
-            Write-Host "ZIP files found elsewhere in the repository:"
-            Get-ChildItem -Path . -Recurse -File -Filter "*.zip" |
-              Where-Object { $_.FullName -notmatch '[\\/](vendor|\.git)[\\/]' } |
-              Select-Object -ExpandProperty FullName
-
-            throw "Packaging did not produce a ZIP in build/dist."
+            throw "No ZIP was produced in build/dist."
           }
 
-          Write-Host "Created package: $($zip.FullName)"
-          Write-Host "DLL SHA256:"
           Get-FileHash $dll -Algorithm SHA256 | Format-List
-          Write-Host "ZIP SHA256:"
           Get-FileHash $zip.FullName -Algorithm SHA256 | Format-List
 
       - name: Upload release artifact
@@ -183,4 +154,3 @@ jobs:
           path: build/dist/*.zip
           if-no-files-found: error
           retention-days: 14
-```
