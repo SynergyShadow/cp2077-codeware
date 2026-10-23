@@ -1,9 +1,9 @@
-name: Codeware Cyberpunk 2.5 Build
+```yaml
+name: build-2.5
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
+  push:
 
 permissions:
   contents: read
@@ -11,61 +11,176 @@ permissions:
 jobs:
   build:
     runs-on: windows-2022
+    env:
+      PROJECT: Codeware
 
     steps:
-      - name: Checkout Codeware 2.5 branch
+      - name: Checkout Codeware
         uses: actions/checkout@v4
         with:
-          repository: SynergyShadow/cp2077-codeware
-          ref: build-2.5
-          submodules: false
+          submodules: recursive
+          fetch-depth: 0
 
-      - name: Checkout submodules with 2.5 SDK
+      - name: Configure RED4ext SDK submodule
         shell: pwsh
         run: |
-          git config -f .gitmodules submodule.vendor/RED4ext.SDK.url https://github.com/KelpHect/RED4ext.SDK-psiberx.git
-          git submodule sync --recursive
-          git submodule update --init --recursive
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $ErrorActionPreference = "Stop"
 
-          $sdk = git -C vendor/RED4ext.SDK rev-parse HEAD
-          if ($sdk -ne 'b139fcbd51b1c391399662f9fbfc00c5977f7231') {
+          git config -f .gitmodules submodule.vendor/RED4ext.SDK.url "https://github.com/KelpHect/RED4ext.SDK-psiberx.git"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to configure the RED4ext SDK submodule URL."
+          }
+
+          git submodule sync -- vendor/RED4ext.SDK
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to synchronize the RED4ext SDK submodule."
+          }
+
+          git submodule update --init --force vendor/RED4ext.SDK
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to update the RED4ext SDK submodule."
+          }
+
+          $sdk = (git -C vendor/RED4ext.SDK rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not determine the RED4ext SDK commit."
+          }
+
+          Write-Host "Checked out RED4ext SDK commit: $sdk"
+
+          if ($sdk -ne "12e0c33337f8612850854fb9ed5ad9628796afca") {
             throw "Unexpected SDK commit: $sdk"
           }
-          Write-Host "SDK commit: $sdk"
 
-      - name: Pin mimalloc 2.2.4 for TiltedCore
-        shell: pwsh
-        run: |
-          $path = "xmake.lua"
-          $content = Get-Content $path -Raw
-          $nl = [Environment]::NewLine
-          $content = $content.Replace(
-            'add_requires("hopscotch-map", "minhook", "spdlog", "tiltedcore")',
-            'add_requires("hopscotch-map", "minhook", "spdlog", "tiltedcore")' + $nl + 'add_requires("mimalloc 2.2.4", {configs = {rltgenrandom = true}})' + $nl + 'add_requireconfs("tiltedcore.mimalloc", {override = true, version = "2.2.4", configs = {rltgenrandom = true}})'
-          )
-          $content = $content.Replace(
-            'add_packages("hopscotch-map", "minhook", "spdlog", "tiltedcore")',
-            'add_packages("hopscotch-map", "minhook", "spdlog", "tiltedcore", "mimalloc")'
-          )
-          Set-Content -Path $path -Value $content -NoNewline
+          Write-Host "RED4ext SDK commit verified."
 
-      - name: Install Xmake
+      - name: Set up Xmake
         uses: xmake-io/github-action-setup-xmake@v1
         with:
           xmake-version: latest
 
+      - name: Pin mimalloc 2.2.4
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $path = "xmake.lua"
+
+          if (-not (Test-Path $path)) {
+            throw "xmake.lua was not found."
+          }
+
+          $content = Get-Content $path -Raw
+          $pin = 'add_requireconfs("tiltedcore.mimalloc", {version = "2.2.4", override = true})'
+
+          if ($content -match 'add_requireconfs\s*\(\s*["'']tiltedcore\.mimalloc') {
+            Write-Host "A mimalloc override already exists."
+          } else {
+            $anchor = 'add_requires("hopscotch-map", "minhook", "spdlog", "tiltedcore")'
+
+            if (-not $content.Contains($anchor)) {
+              throw "Could not find the root-level dependency declaration in xmake.lua."
+            }
+
+            $content = $content.Replace($anchor, "$pin`r`n$anchor")
+            Set-Content -Path $path -Value $content -NoNewline
+          }
+
+          Write-Host "Dependency configuration:"
+          Get-Content $path | Select-Object -First 60
+
       - name: Configure Release build
-        run: xmake f -p windows -a x64 -m release -y
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          xmake f -m release -y
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Xmake configuration failed with exit code $LASTEXITCODE."
+          }
 
       - name: Build Codeware
-        run: xmake -vD -y
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          xmake -y
 
-      - name: Upload compiled DLL and PDB
+          if ($LASTEXITCODE -ne 0) {
+            throw "Codeware compilation failed with exit code $LASTEXITCODE."
+          }
+
+      - name: Locate compiled DLL
+        id: locate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $dll = Get-ChildItem -Path build -Recurse -File -Filter "Codeware.dll" -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '[\\/]release[\\/]' } |
+            Select-Object -First 1
+
+          if (-not $dll) {
+            Write-Host "No release DLL found under build. Searching repository..."
+
+            $dll = Get-ChildItem -Path . -Recurse -File -Filter "Codeware.dll" |
+              Where-Object { $_.FullName -notmatch '[\\/](vendor|\.git)[\\/]' } |
+              Select-Object -First 1
+          }
+
+          if (-not $dll) {
+            throw "Codeware.dll was not produced."
+          }
+
+          Write-Host "Found DLL: $($dll.FullName)"
+          "dll=$($dll.FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Package release ZIP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $script = Join-Path $PWD "tools/dist/package-mod.ps1"
+          if (-not (Test-Path $script)) {
+            throw "Packaging script not found: $script"
+          }
+
+          $dll = "${{ steps.locate.outputs.dll }}"
+          if (-not (Test-Path $dll)) {
+            throw "Compiled DLL does not exist: $dll"
+          }
+
+          New-Item -ItemType Directory -Path "build/dist" -Force | Out-Null
+
+          Write-Host "Packaging: $dll"
+          & $script -ReleaseBin $dll -ProjectName $env:PROJECT
+
+          if (-not $?) {
+            throw "The packaging script reported a failure."
+          }
+
+          $zip = Get-ChildItem -Path "build/dist" -File -Filter "*.zip" -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+
+          if (-not $zip) {
+            Write-Host "ZIP files found elsewhere in the repository:"
+            Get-ChildItem -Path . -Recurse -File -Filter "*.zip" |
+              Where-Object { $_.FullName -notmatch '[\\/](vendor|\.git)[\\/]' } |
+              Select-Object -ExpandProperty FullName
+
+            throw "Packaging did not produce a ZIP in build/dist."
+          }
+
+          Write-Host "Created package: $($zip.FullName)"
+          Write-Host "DLL SHA256:"
+          Get-FileHash $dll -Algorithm SHA256 | Format-List
+          Write-Host "ZIP SHA256:"
+          Get-FileHash $zip.FullName -Algorithm SHA256 | Format-List
+
+      - name: Upload release artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Codeware-Cyberpunk-2.5-test
-          path: |
-            build/**/Codeware.dll
-            build/**/Codeware.pdb
+          name: Codeware-${{ github.sha }}
+          path: build/dist/*.zip
           if-no-files-found: error
+          retention-days: 14
+```
