@@ -1,0 +1,41 @@
+# Minimal Windows build for a psiberx RED4ext plugin (ArchiveXL / Codeware / TweakXL).
+# Builds the exact checked-out commit and packages it with the repo's own tools/dist/package-mod.ps1,
+# so the artifact matches the official release zip layout. No secrets used; read-only token.
+name: build-2.5
+on:
+  workflow_dispatch:
+  push:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      PROJECT: Codeware
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: latest
+      - name: Pin mimalloc 2.2.4 for tiltedcore (mimalloc 3.x breaks linking, per ArchiveXL PR #31)
+        shell: pwsh
+        run: Add-Content xmake.lua "`nadd_requireconfs(`"tiltedcore.mimalloc`", {version = `"2.2.4`", override = true})"
+      - name: Build release
+        shell: pwsh
+        run: |
+          xmake f -m release -y
+          xmake -y
+      - name: Package (repo's own release script)
+        shell: pwsh
+        run: |
+          $dll = Get-ChildItem -Recurse build -Filter "$env:PROJECT.dll" | Where-Object FullName -match 'release' | Select-Object -First 1
+          & ./tools/dist/package-mod.ps1 -ReleaseBin $dll.FullName -ProjectName $env:PROJECT
+          Get-FileHash build/dist/*.zip -Algorithm SHA256 | Format-List
+          Get-FileHash $dll.FullName -Algorithm SHA256 | Format-List
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PROJECT }}-${{ github.sha }}
+          path: build/dist/*.zip
