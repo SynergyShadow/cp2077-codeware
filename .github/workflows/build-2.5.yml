@@ -1,9 +1,9 @@
-# Minimal Windows build for Codeware 2.5
-name: build-2.5
+name: Codeware Cyberpunk 2.5 Build
 
 on:
-  workflow_dispatch:
   push:
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -11,102 +11,61 @@ permissions:
 jobs:
   build:
     runs-on: windows-2022
-    env:
-      PROJECT: Codeware
 
     steps:
-      - name: Checkout Codeware
+      - name: Checkout Codeware 2.5 branch
         uses: actions/checkout@v4
         with:
-          submodules: recursive
-          fetch-depth: 0
+          repository: SynergyShadow/cp2077-codeware
+          ref: build-2.5
+          submodules: false
 
-      - name: Set up Xmake
-        uses: xmake-io/github-action-setup-xmake@v1
-        with:
-          xmake-version: latest
+      - name: Checkout submodules with 2.5 SDK
+        shell: pwsh
+        run: |
+          git config -f .gitmodules submodule.vendor/RED4ext.SDK.url https://github.com/KelpHect/RED4ext.SDK-psiberx.git
+          git submodule sync --recursive
+          git submodule update --init --recursive
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Pin mimalloc 2.2.4
+          $sdk = git -C vendor/RED4ext.SDK rev-parse HEAD
+          if ($sdk -ne 'b139fcbd51b1c391399662f9fbfc00c5977f7231') {
+            throw "Unexpected SDK commit: $sdk"
+          }
+          Write-Host "SDK commit: $sdk"
+
+      - name: Pin mimalloc 2.2.4 for TiltedCore
         shell: pwsh
         run: |
           $path = "xmake.lua"
           $content = Get-Content $path -Raw
+          $nl = [Environment]::NewLine
+          $content = $content.Replace(
+            'add_requires("hopscotch-map", "minhook", "spdlog", "tiltedcore")',
+            'add_requires("hopscotch-map", "minhook", "spdlog", "tiltedcore")' + $nl + 'add_requires("mimalloc 2.2.4", {configs = {rltgenrandom = true}})' + $nl + 'add_requireconfs("tiltedcore.mimalloc", {override = true, version = "2.2.4", configs = {rltgenrandom = true}})'
+          )
+          $content = $content.Replace(
+            'add_packages("hopscotch-map", "minhook", "spdlog", "tiltedcore")',
+            'add_packages("hopscotch-map", "minhook", "spdlog", "tiltedcore", "mimalloc")'
+          )
+          Set-Content -Path $path -Value $content -NoNewline
 
-          if ($content -match 'add_requireconfs\s*\(\s*["'']tiltedcore\.mimalloc') {
-            Write-Host "Dependency override already exists."
-          } else {
-            $anchor = 'add_requires("hopscotch-map", "minhook", "spdlog", "tiltedcore")'
-            $replacement = @'
-          add_requireconfs("tiltedcore.mimalloc", {version = "2.2.4", override = true})
-          add_requires("hopscotch-map", "minhook", "spdlog", "tiltedcore")
-          '@.TrimEnd()
+      - name: Install Xmake
+        uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: latest
 
-            if (-not $content.Contains($anchor)) {
-              throw "Expected dependency declaration was not found. Check the checked-out xmake.lua."
-            }
-
-            $content = $content.Replace($anchor, $replacement)
-            Set-Content -Path $path -Value $content -NoNewline
-          }
-
-      - name: Configure release build
-        shell: pwsh
-        run: |
-          xmake f -m release -y
-          if ($LASTEXITCODE -ne 0) {
-            throw "Xmake configuration failed."
-          }
+      - name: Configure Release build
+        run: xmake f -p windows -a x64 -m release -y
 
       - name: Build Codeware
-        shell: pwsh
-        run: |
-          xmake -y
-          if ($LASTEXITCODE -ne 0) {
-            throw "Xmake compilation failed."
-          }
+        run: xmake -vD -y
 
-      - name: Package release ZIP
-        shell: pwsh
-        run: |
-          $dll = Get-ChildItem -Path build -Recurse -File -Filter "Codeware.dll" |
-            Where-Object { $_.FullName -match '[\\/]release[\\/]' } |
-            Select-Object -First 1
-
-          if (-not $dll) {
-            Write-Host "Release DLL not found under build. Searching the repository..."
-            $dll = Get-ChildItem -Path . -Recurse -File -Filter "Codeware.dll" |
-              Where-Object { $_.FullName -notmatch '[\\/](vendor|\.git)[\\/]' } |
-              Select-Object -First 1
-          }
-
-          if (-not $dll) {
-            throw "Codeware.dll was not produced."
-          }
-
-          if (-not (Test-Path "./tools/dist/package-mod.ps1")) {
-            throw "tools/dist/package-mod.ps1 was not found in this checkout."
-          }
-
-          & "./tools/dist/package-mod.ps1" -ReleaseBin $dll.FullName -ProjectName $env:PROJECT
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Release packaging failed."
-          }
-
-          $zip = Get-ChildItem -Path "build/dist" -File -Filter "*.zip" |
-            Select-Object -First 1
-
-          if (-not $zip) {
-            throw "Packaging completed without producing a ZIP in build/dist."
-          }
-
-          Get-FileHash $dll.FullName -Algorithm SHA256 | Format-List
-          Get-FileHash $zip.FullName -Algorithm SHA256 | Format-List
-
-      - name: Upload release artifact
+      - name: Upload compiled DLL and PDB
         uses: actions/upload-artifact@v4
         with:
-          name: Codeware-${{ github.sha }}
-          path: build/dist/*.zip
+          name: Codeware-Cyberpunk-2.5-test
+          path: |
+            build/**/Codeware.dll
+            build/**/Codeware.pdb
           if-no-files-found: error
-          retention-days: 14
