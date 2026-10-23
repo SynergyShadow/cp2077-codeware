@@ -16,8 +16,8 @@ jobs:
       - name: Checkout Codeware 2.5 branch
         uses: actions/checkout@v4
         with:
-          repository: KelpHect/cp2077-codeware
-          ref: patch-2.5-support
+          repository: SynergyShadow/cp2077-codeware
+          ref: build-2.5
           submodules: false
 
       - name: Checkout submodules with 2.5 SDK
