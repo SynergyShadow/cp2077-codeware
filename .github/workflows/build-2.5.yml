@@ -1,41 +1,112 @@
-# Minimal Windows build for a psiberx RED4ext plugin (ArchiveXL / Codeware / TweakXL).
-# Builds the exact checked-out commit and packages it with the repo's own tools/dist/package-mod.ps1,
-# so the artifact matches the official release zip layout. No secrets used; read-only token.
+# Minimal Windows build for Codeware 2.5
 name: build-2.5
+
 on:
   workflow_dispatch:
   push:
+
 permissions:
   contents: read
+
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: windows-2022
     env:
       PROJECT: Codeware
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Codeware
+        uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0
-      - uses: xmake-io/github-action-setup-xmake@v1
+
+      - name: Set up Xmake
+        uses: xmake-io/github-action-setup-xmake@v1
         with:
           xmake-version: latest
-      - name: Pin mimalloc 2.2.4 for tiltedcore (mimalloc 3.x breaks linking, per ArchiveXL PR #31)
+
+      - name: Pin mimalloc 2.2.4
         shell: pwsh
-        run: Add-Content xmake.lua "`nadd_requireconfs(`"tiltedcore.mimalloc`", {version = `"2.2.4`", override = true})"
-      - name: Build release
+        run: |
+          $path = "xmake.lua"
+          $content = Get-Content $path -Raw
+
+          if ($content -match 'add_requireconfs\s*\(\s*["'']tiltedcore\.mimalloc') {
+            Write-Host "Dependency override already exists."
+          } else {
+            $anchor = 'add_requires("hopscotch-map", "minhook", "spdlog", "tiltedcore")'
+            $replacement = @'
+          add_requireconfs("tiltedcore.mimalloc", {version = "2.2.4", override = true})
+          add_requires("hopscotch-map", "minhook", "spdlog", "tiltedcore")
+          '@.TrimEnd()
+
+            if (-not $content.Contains($anchor)) {
+              throw "Expected dependency declaration was not found. Check the checked-out xmake.lua."
+            }
+
+            $content = $content.Replace($anchor, $replacement)
+            Set-Content -Path $path -Value $content -NoNewline
+          }
+
+      - name: Configure release build
         shell: pwsh
         run: |
           xmake f -m release -y
-          xmake -y
-      - name: Package (repo's own release script)
+          if ($LASTEXITCODE -ne 0) {
+            throw "Xmake configuration failed."
+          }
+
+      - name: Build Codeware
         shell: pwsh
         run: |
-          $dll = Get-ChildItem -Recurse build -Filter "$env:PROJECT.dll" | Where-Object FullName -match 'release' | Select-Object -First 1
-          & ./tools/dist/package-mod.ps1 -ReleaseBin $dll.FullName -ProjectName $env:PROJECT
-          Get-FileHash build/dist/*.zip -Algorithm SHA256 | Format-List
+          xmake -y
+          if ($LASTEXITCODE -ne 0) {
+            throw "Xmake compilation failed."
+          }
+
+      - name: Package release ZIP
+        shell: pwsh
+        run: |
+          $dll = Get-ChildItem -Path build -Recurse -File -Filter "Codeware.dll" |
+            Where-Object { $_.FullName -match '[\\/]release[\\/]' } |
+            Select-Object -First 1
+
+          if (-not $dll) {
+            Write-Host "Release DLL not found under build. Searching the repository..."
+            $dll = Get-ChildItem -Path . -Recurse -File -Filter "Codeware.dll" |
+              Where-Object { $_.FullName -notmatch '[\\/](vendor|\.git)[\\/]' } |
+              Select-Object -First 1
+          }
+
+          if (-not $dll) {
+            throw "Codeware.dll was not produced."
+          }
+
+          if (-not (Test-Path "./tools/dist/package-mod.ps1")) {
+            throw "tools/dist/package-mod.ps1 was not found in this checkout."
+          }
+
+          & "./tools/dist/package-mod.ps1" -ReleaseBin $dll.FullName -ProjectName $env:PROJECT
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Release packaging failed."
+          }
+
+          $zip = Get-ChildItem -Path "build/dist" -File -Filter "*.zip" |
+            Select-Object -First 1
+
+          if (-not $zip) {
+            throw "Packaging completed without producing a ZIP in build/dist."
+          }
+
           Get-FileHash $dll.FullName -Algorithm SHA256 | Format-List
-      - uses: actions/upload-artifact@v4
+          Get-FileHash $zip.FullName -Algorithm SHA256 | Format-List
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.PROJECT }}-${{ github.sha }}
+          name: Codeware-${{ github.sha }}
           path: build/dist/*.zip
+          if-no-files-found: error
+          retention-days: 14
